@@ -12,7 +12,6 @@ using Dalamud.Game.Inventory;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using OmniToolbox.Common.Module.Abstractions;
@@ -22,6 +21,10 @@ using OmniToolbox.Host;
 using OmniToolbox.UI.Controls;
 using OmniToolbox.UI.Theme;
 using OmenTools.Dalamud;
+using OmenTools.Info.Game.Packets.Upstream;
+using GameEventHandler = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandler;
+using GameEventHandlerContent = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandlerContent;
+using GameEventID = FFXIVClientStructs.FFXIV.Client.Game.Event.EventId;
 using ValueType = FFXIVClientStructs.FFXIV.Component.GUI.AtkValueType;
 
 namespace OmniToolbox.TreePublic;
@@ -31,7 +34,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
     public override ModuleInfo Info { get; } = new()
     {
         Title = "自动重建伊修加德",
-        Description = "调用 Artisan 制作第四期重建物品，达到条件后自动前往提交，并按票数阈值进行库啵好运道抽奖。仅适用于国服中文客户端。",
+        Description = "准备好生产材料后，模块将通过Artisan插件进行自动生产，随后进行自动提交与库啵好运道",
         Category = ModuleCategory.Automation,
         Author = "Angelways",
         Commands =
@@ -143,8 +146,6 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
     private const uint AppraiserNPCID1 = 1031690;
     private const uint AppraiserNPCID2 = 1031677;
     private const uint LotteryNPCID = 1031692;
-    private static readonly Vector3 AppraiserPosition = new(43.59162f, -16f, 170.3864f);
-    private static readonly Vector3 LotteryPosition = new(52.780884f, -16.000002f, 170.61108f);
     private static readonly Regex VoucherPattern = new("^(\\d+)/(\\d+)$", RegexOptions.Compiled);
 
     public override bool HasSettings => true;
@@ -552,7 +553,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 }
                 break;
             case AutomationPhase.MoveToAppraiser:
-                DriveMoveToNPC([AppraiserNPCID1, AppraiserNPCID2], AppraiserPosition,
+                DriveStartNPCEvent([AppraiserNPCID1, AppraiserNPCID2],
                     AutomationPhase.OpenAppraiser, "提交NPC");
                 break;
             case AutomationPhase.OpenAppraiser:
@@ -574,7 +575,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 DriveWaitSupplyRefresh(recipe);
                 break;
             case AutomationPhase.MoveToLottery:
-                DriveMoveToNPC([LotteryNPCID], LotteryPosition, AutomationPhase.OpenLottery, "库啵好运道NPC");
+                DriveStartNPCEvent([LotteryNPCID], AutomationPhase.OpenLottery, "库啵好运道NPC");
                 break;
             case AutomationPhase.OpenLottery:
                 DriveOpenLottery();
@@ -756,41 +757,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         }
     }
 
-    private void DriveMoveToNPC(uint[] npcIDs, Vector3 fallbackPosition, AutomationPhase nextPhase, string label)
+    private void DriveStartNPCEvent(uint[] npcIDs, AutomationPhase nextPhase, string label)
     {
-        var services = OmenTools.DService.Instance();
-        var player = services.ObjectTable.LocalPlayer;
-        if (player is null)
-        {
-            FailAutomation("无法读取玩家位置。");
-            return;
-        }
-
-        var npc = services.ObjectTable.FirstOrDefault(o => npcIDs.Contains(GetBaseID(o.Address)) && o.IsTargetable);
-        var destination = npc?.Position ?? fallbackPosition;
-        if (Vector3.Distance(player.Position, destination) > 3.5f)
-        {
-            if (!vnavmeshIPC.IsPluginEnabled() || !vnavmeshIPC.GetIsNavReady())
-            {
-                FailAutomation("vnavmesh 未安装或导航网格尚未就绪。");
-                return;
-            }
-
-            if (!vnavmeshIPC.GetIsPathfindRunning() && DateTime.UtcNow >= nextActionAt)
-            {
-                vnavmeshIPC.PathfindAndMoveTo(destination, false);
-                nextActionAt = DateTime.UtcNow.AddSeconds(1);
-            }
-
-            status = $"正在前往{label}";
-            if (PhaseTimedOut(TimeSpan.FromSeconds(90)))
-            {
-                FailAutomation($"前往{label}超时。");
-            }
-
-            return;
-        }
-
         vnavmeshIPC.StopPathfind();
         if (IsOccupied())
         {
@@ -798,18 +766,18 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             return;
         }
 
+        var npc = OmenTools.DService.Instance().ObjectTable
+            .FirstOrDefault(o => npcIDs.Contains(GetBaseID(o.Address)) && o.IsTargetable);
         if (npc is null)
         {
-            FailAutomation($"已到达{label}附近，但未找到NPC对象。");
+            FailAutomation($"未找到{label}。");
             return;
         }
 
-        unsafe
+        if (!SendNPCEventStart(npc.Address))
         {
-            var targetSystem = TargetSystem.Instance();
-            var gameObject = (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address;
-            targetSystem->Target = gameObject;
-            targetSystem->OpenObjectInteraction(gameObject);
+            FailAutomation($"无法打开{label}界面。");
+            return;
         }
 
         EnterPhase(nextPhase);
@@ -1185,7 +1153,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
         if (PhaseTimedOut(TimeSpan.FromSeconds(30)))
         {
-            FailAutomation($"等待库啵好运道揭晓超时（界面阶段 {addon->Stage}，已尝试 {lotteryScratchAttempts} 次）。");
+            FailAutomation("等待库啵好运道揭晓超时。");
         }
     }
 
@@ -1213,7 +1181,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             {
                 EnterPhase(AutomationPhase.PlayLottery);
                 nextActionAt = DateTime.UtcNow;
-                status = $"继续处理库啵好运道界面（阶段 {lottery->Stage}）";
+                status = "正在继续抽奖";
             }
             return;
         }
@@ -1253,10 +1221,12 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 return;
             }
 
-            var targetSystem = TargetSystem.Instance();
-            var gameObject = (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)npc.Address;
-            targetSystem->Target = gameObject;
-            targetSystem->OpenObjectInteraction(gameObject);
+            if (!SendNPCEventStart(npc.Address))
+            {
+                FailAutomation("无法打开库啵好运道NPC界面。");
+                return;
+            }
+
             EnterPhase(AutomationPhase.OpenLottery);
             nextActionAt = DateTime.UtcNow.AddMilliseconds(600);
             lotteryScratched = false;
@@ -1379,6 +1349,83 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private static unsafe uint GetBaseID(nint address) =>
         address == nint.Zero ? 0 : ((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)address)->BaseId;
+
+    private static unsafe bool SendNPCEventStart(nint address)
+    {
+        var gameObject = (FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)address;
+        if (gameObject == null || !TryResolveNPCEventID(gameObject, out var eventID))
+        {
+            return false;
+        }
+
+        var objectID = gameObject->GetGameObjectId();
+        new EventStartPackt(objectID, eventID).Send();
+        return true;
+    }
+
+    private static unsafe bool TryResolveNPCEventID(
+        FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject* gameObject,
+        out GameEventID eventID)
+    {
+        eventID = default;
+
+        if (gameObject->EventId.Id != 0)
+        {
+            eventID = gameObject->EventId;
+            if (eventID.ContentId == GameEventHandlerContent.HwdDev)
+            {
+                return true;
+            }
+        }
+
+        if (gameObject->EventHandler != null)
+        {
+            var primary = gameObject->EventHandler->GetEventId();
+            if (primary.Id != 0)
+            {
+                if (primary.ContentId == GameEventHandlerContent.HwdDev)
+                {
+                    eventID = primary;
+                    return true;
+                }
+
+                if (eventID.Id == 0)
+                {
+                    eventID = primary;
+                }
+            }
+        }
+
+        var handlers = stackalloc GameEventHandler*[32];
+        var handlerCount = Math.Clamp(gameObject->GetEventHandlersImpl(handlers), 0, 32);
+        for (var index = 0; index < handlerCount; index++)
+        {
+            var handler = handlers[index];
+            if (handler == null)
+            {
+                continue;
+            }
+
+            var candidate = handler->GetEventId();
+            if (candidate.Id == 0)
+            {
+                continue;
+            }
+
+            if (candidate.ContentId == GameEventHandlerContent.HwdDev)
+            {
+                eventID = candidate;
+                return true;
+            }
+
+            if (eventID.Id == 0)
+            {
+                eventID = candidate;
+            }
+        }
+
+        return eventID.Id != 0;
+    }
 
     private static bool IsOccupied()
     {
