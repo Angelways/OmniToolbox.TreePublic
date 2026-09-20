@@ -9,18 +9,26 @@ using System.Text.RegularExpressions;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Inventory;
+using Dalamud.Game.Command;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Lumina.Excel.Sheets;
 using OmniToolbox.Common.Module.Abstractions;
 using OmniToolbox.Common.Module.Enums;
 using OmniToolbox.Common.Module.Models;
 using OmniToolbox.Host;
+using OmniToolbox.UI;
 using OmniToolbox.UI.Controls;
 using OmniToolbox.UI.Theme;
 using OmenTools.Dalamud;
+using OmenTools.Extensions;
+using OmenTools.Interop.Game.Lumina;
+using OmenTools.Interop.Game.AddonEvent;
 using OmenTools.Info.Game.Packets.Upstream;
 using GameEventHandler = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandler;
 using GameEventHandlerContent = FFXIVClientStructs.FFXIV.Client.Game.Event.EventHandlerContent;
@@ -37,13 +45,22 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         Description = "准备好生产材料后，模块将通过Artisan插件进行自动生产，随后进行自动提交与库啵好运道",
         Category = ModuleCategory.Automation,
         Author = "Angelways",
+        SupportUrls = ["https://github.com/Angelways"],
         Commands =
         [
-            new ModuleCommand("开始：/omni AutoIshgardRestoration start", "/omni AutoIshgardRestoration start"),
-            new ModuleCommand("停止：/omni AutoIshgardRestoration stop", "/omni AutoIshgardRestoration stop")
+            new ModuleCommand(
+                "/omni 自动重建伊修加德 → 打开自动重建伊修加德窗口",
+                "/omni 自动重建伊修加德"),
+            new ModuleCommand(
+                "/omni 开关自动重建伊修加德 → 控制重建伊修加德自动化流程",
+                "/omni 开关自动重建伊修加德")
         ]
     };
 
+    private const string OPEN_COMMAND = "自动重建伊修加德";
+    private const string TOGGLE_COMMAND = "开关自动重建伊修加德";
+    private OmenTools.OmenService.CommandManager? commandManager;
+    private readonly Dictionary<string, CommandInfo> registeredCommands = [];
 
     private static readonly GameInventoryType[] MainInventoryTypes =
     [
@@ -55,61 +72,61 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private static readonly RecipeOption[] Recipes =
     [
-        new(34433, 31913, 8, 20, false, "刻木匠", "第四期重建用的合板"),
-        new(34441, 31921, 8, 40, false, "刻木匠", "第四期重建用的木箱"),
-        new(34449, 31929, 8, 60, false, "刻木匠", "第四期重建用的纺车"),
-        new(34457, 31937, 8, 70, false, "刻木匠", "第四期重建用的梯子"),
-        new(34465, 31945, 8, 80, false, "刻木匠", "第四期重建用的睡床"),
-        new(34473, 31953, 8, 80, true,  "刻木匠", "第四期重建用的特供冰盒"),
+        new(34433, 31913, 8, 20, false, "第四期重建用的合板"),
+        new(34441, 31921, 8, 40, false, "第四期重建用的木箱"),
+        new(34449, 31929, 8, 60, false, "第四期重建用的纺车"),
+        new(34457, 31937, 8, 70, false, "第四期重建用的梯子"),
+        new(34465, 31945, 8, 80, false, "第四期重建用的睡床"),
+        new(34473, 31953, 8, 80, true,  "第四期重建用的特供冰盒"),
 
-        new(34434, 31914, 9, 20, false, "锻铁匠", "第四期重建用的合金"),
-        new(34442, 31922, 9, 40, false, "锻铁匠", "第四期重建用的铁钉"),
-        new(34450, 31930, 9, 60, false, "锻铁匠", "第四期重建用的手斧"),
-        new(34458, 31938, 9, 70, false, "锻铁匠", "第四期重建用的锯子"),
-        new(34466, 31946, 9, 80, false, "锻铁匠", "第四期重建用的火炉"),
-        new(34474, 31954, 9, 80, true,  "锻铁匠", "第四期重建用的特供风向陆行鸟"),
+        new(34434, 31914, 9, 20, false, "第四期重建用的合金"),
+        new(34442, 31922, 9, 40, false, "第四期重建用的铁钉"),
+        new(34450, 31930, 9, 60, false, "第四期重建用的手斧"),
+        new(34458, 31938, 9, 70, false, "第四期重建用的锯子"),
+        new(34466, 31946, 9, 80, false, "第四期重建用的火炉"),
+        new(34474, 31954, 9, 80, true,  "第四期重建用的特供风向陆行鸟"),
 
-        new(34435, 31915, 10, 20, false, "铸甲匠", "第四期重建用的金属板"),
-        new(34443, 31923, 10, 40, false, "铸甲匠", "第四期重建用的铆钉"),
-        new(34451, 31931, 10, 60, false, "铸甲匠", "第四期重建用的吊锅"),
-        new(34459, 31939, 10, 70, false, "铸甲匠", "第四期重建用的口罩"),
-        new(34467, 31947, 10, 80, false, "铸甲匠", "第四期重建用的街灯"),
-        new(34475, 31955, 10, 80, true,  "铸甲匠", "第四期重建用的特供部队储物柜"),
+        new(34435, 31915, 10, 20, false, "第四期重建用的金属板"),
+        new(34443, 31923, 10, 40, false, "第四期重建用的铆钉"),
+        new(34451, 31931, 10, 60, false, "第四期重建用的吊锅"),
+        new(34459, 31939, 10, 70, false, "第四期重建用的口罩"),
+        new(34467, 31947, 10, 80, false, "第四期重建用的街灯"),
+        new(34475, 31955, 10, 80, true,  "第四期重建用的特供部队储物柜"),
 
-        new(34436, 31916, 11, 20, false, "雕金匠", "第四期重建用的金属锭"),
-        new(34444, 31924, 11, 40, false, "雕金匠", "第四期重建用的铁环"),
-        new(34452, 31932, 11, 60, false, "雕金匠", "第四期重建用的裁衣工具"),
-        new(34460, 31940, 11, 70, false, "雕金匠", "第四期重建用的石材"),
-        new(34468, 31948, 11, 80, false, "雕金匠", "第四期重建用的篝火台"),
-        new(34476, 31956, 11, 80, true,  "雕金匠", "第四期重建用的特供天文仪"),
+        new(34436, 31916, 11, 20, false, "第四期重建用的金属锭"),
+        new(34444, 31924, 11, 40, false, "第四期重建用的铁环"),
+        new(34452, 31932, 11, 60, false, "第四期重建用的裁衣工具"),
+        new(34460, 31940, 11, 70, false, "第四期重建用的石材"),
+        new(34468, 31948, 11, 80, false, "第四期重建用的篝火台"),
+        new(34476, 31956, 11, 80, true,  "第四期重建用的特供天文仪"),
 
-        new(34437, 31917, 12, 20, false, "制革匠", "第四期重建用的鞣革"),
-        new(34445, 31925, 12, 40, false, "制革匠", "第四期重建用的皮绳"),
-        new(34453, 31933, 12, 60, false, "制革匠", "第四期重建用的皮袋"),
-        new(34461, 31941, 12, 70, false, "制革匠", "第四期重建用的长靴"),
-        new(34469, 31949, 12, 80, false, "制革匠", "第四期重建用的工作服"),
-        new(34477, 31957, 12, 80, true,  "制革匠", "第四期重建用的特供工具腰带"),
+        new(34437, 31917, 12, 20, false, "第四期重建用的鞣革"),
+        new(34445, 31925, 12, 40, false, "第四期重建用的皮绳"),
+        new(34453, 31933, 12, 60, false, "第四期重建用的皮袋"),
+        new(34461, 31941, 12, 70, false, "第四期重建用的长靴"),
+        new(34469, 31949, 12, 80, false, "第四期重建用的工作服"),
+        new(34477, 31957, 12, 80, true,  "第四期重建用的特供工具腰带"),
 
-        new(34438, 31918, 13, 20, false, "裁衣匠", "第四期重建用的草绳"),
-        new(34446, 31926, 13, 40, false, "裁衣匠", "第四期重建用的布料"),
-        new(34454, 31934, 13, 60, false, "裁衣匠", "第四期重建用的扫把"),
-        new(34462, 31942, 13, 70, false, "裁衣匠", "第四期重建用的手套"),
-        new(34470, 31950, 13, 80, false, "裁衣匠", "第四期重建用的遮蓬"),
-        new(34478, 31958, 13, 80, true,  "裁衣匠", "第四期重建用的特供坎肩"),
+        new(34438, 31918, 13, 20, false, "第四期重建用的草绳"),
+        new(34446, 31926, 13, 40, false, "第四期重建用的布料"),
+        new(34454, 31934, 13, 60, false, "第四期重建用的扫把"),
+        new(34462, 31942, 13, 70, false, "第四期重建用的手套"),
+        new(34470, 31950, 13, 80, false, "第四期重建用的遮蓬"),
+        new(34478, 31958, 13, 80, true,  "第四期重建用的特供坎肩"),
 
-        new(34439, 31919, 14, 20, false, "炼金术士", "第四期重建用的墨水"),
-        new(34447, 31927, 14, 40, false, "炼金术士", "第四期重建用的植物油"),
-        new(34455, 31935, 14, 60, false, "炼金术士", "第四期重建用的圣水"),
-        new(34463, 31943, 14, 70, false, "炼金术士", "第四期重建用的肥皂"),
-        new(34471, 31951, 14, 80, false, "炼金术士", "第四期重建用的植物成长剂"),
-        new(34479, 31959, 14, 80, true,  "炼金术士", "第四期重建用的特供幻药"),
+        new(34439, 31919, 14, 20, false, "第四期重建用的墨水"),
+        new(34447, 31927, 14, 40, false, "第四期重建用的植物油"),
+        new(34455, 31935, 14, 60, false, "第四期重建用的圣水"),
+        new(34463, 31943, 14, 70, false, "第四期重建用的肥皂"),
+        new(34471, 31951, 14, 80, false, "第四期重建用的植物成长剂"),
+        new(34479, 31959, 14, 80, true,  "第四期重建用的特供幻药"),
 
-        new(34440, 31920, 15, 20, false, "烹调师", "第四期重建用的麻乳"),
-        new(34448, 31928, 15, 40, false, "烹调师", "第四期重建用的芝麻饼干"),
-        new(34456, 31936, 15, 60, false, "烹调师", "第四期重建用的红茶"),
-        new(34464, 31944, 15, 70, false, "烹调师", "第四期重建用的药汤"),
-        new(34472, 31952, 15, 80, false, "烹调师", "第四期重建用的炖菜"),
-        new(34480, 31960, 15, 80, true,  "烹调师", "第四期重建用的特供冰糕")
+        new(34440, 31920, 15, 20, false, "第四期重建用的麻乳"),
+        new(34448, 31928, 15, 40, false, "第四期重建用的芝麻饼干"),
+        new(34456, 31936, 15, 60, false, "第四期重建用的红茶"),
+        new(34464, 31944, 15, 70, false, "第四期重建用的药汤"),
+        new(34472, 31952, 15, 80, false, "第四期重建用的炖菜"),
+        new(34480, 31960, 15, 80, true,  "第四期重建用的特供冰糕")
     ];
 
     private ICallGateSubscriber<ushort, int, object>? craftItem;
@@ -120,6 +137,13 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
     private DateTime phaseStartedAt;
     private DateTime nextActionAt;
     private bool running;
+    private bool windowOpen;
+    private bool windowExpanded;
+    private bool windowCollapsed;
+    private bool windowSizePending;
+    private bool windowConfigChanged;
+    private bool artisanStartedByModule;
+    private bool vnavPathStartedByModule;
     private uint activeRecipeID;
     private uint activeItemID;
     private AutomationPhase phase;
@@ -132,21 +156,20 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
     private int craftCycleStartingItemCount;
     private DateTime? movableSince;
     private Vector3 initialDestination;
-    private DateTime nextDebugReadAt;
-    private int debugVoucherCount = -1;
-    private int debugVoucherLimit = -1;
-    private string debugVoucherStatus = "HWDSupply 未打开";
+    private DateTime nextVoucherReadAt;
+    private int voucherCount = -1;
+    private int voucherLimit = -1;
     private string status = "待机";
     private string lastError = string.Empty;
 
-    private const uint FirmamentTerritoryID = 886;
-    private const string FirmamentTeleportCommand = "/pdrtelepo 无名众人广场";
-    private const uint SkybuildersScripItemID = 28063;
-    private const int RightLotteryEventParam = 22;
-    private const uint AppraiserNPCID1 = 1031690;
-    private const uint AppraiserNPCID2 = 1031677;
-    private const uint LotteryNPCID = 1031692;
-    private static readonly Regex VoucherPattern = new("^(\\d+)/(\\d+)$", RegexOptions.Compiled);
+    private const uint FIRMAMENT_TERRITORY_ID = 886;
+    private const string FIRMAMENT_TELEPORT_COMMAND = "/pdrtelepo 无名众人广场";
+    private const uint SKYBUILDERS_SCRIP_ITEM_ID = 28063;
+    private const int RIGHT_LOTTERY_EVENT_PARAM = 22;
+    private const uint APPRAISER_NPC_ID_1 = 1031690;
+    private const uint APPRAISER_NPC_ID_2 = 1031677;
+    private const uint LOTTERY_NPC_ID = 1031692;
+    private static readonly Regex VOUCHER_PATTERN = new("^(\\d+)/(\\d+)$", RegexOptions.Compiled);
 
     public override bool HasSettings => true;
 
@@ -156,12 +179,20 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         artisanIsBusy = DalamudServices.PluginInterface.GetIpcSubscriber<bool>("Artisan.IsBusy");
         getStopRequest = DalamudServices.PluginInterface.GetIpcSubscriber<bool>("Artisan.GetStopRequest");
         setStopRequest = DalamudServices.PluginInterface.GetIpcSubscriber<bool, object>("Artisan.SetStopRequest");
+        RegisterCommands(OmenTools.OmenService.CommandManager.Instance());
         DalamudServices.Framework.Update += OnFrameworkUpdate;
+        DalamudServices.PluginInterface.UiBuilder.Draw += DrawConfigurationWindow;
     }
 
     protected override void OnDisable()
     {
+        UnregisterCommands();
         DalamudServices.Framework.Update -= OnFrameworkUpdate;
+        DalamudServices.PluginInterface.UiBuilder.Draw -= DrawConfigurationWindow;
+        windowOpen = false;
+        windowExpanded = false;
+        windowCollapsed = false;
+        windowSizePending = false;
         StopProduction("模块已停用");
         craftItem = null;
         artisanIsBusy = null;
@@ -180,33 +211,282 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         return true;
     }
 
+    protected override void OnDispose()
+    {
+        CleanupScripPurchase();
+        UnregisterCommands();
+    }
+
+    private void RegisterCommands(OmenTools.OmenService.CommandManager manager)
+    {
+        UnregisterCommands();
+        commandManager = manager;
+        try
+        {
+            Register(OPEN_COMMAND, "打开自动重建伊修加德窗口");
+            Register(TOGGLE_COMMAND, "控制重建伊修加德自动化流程");
+        }
+        catch
+        {
+            UnregisterCommands();
+            throw;
+        }
+
+        void Register(string name, string description)
+        {
+            var info = new CommandInfo(OnRegisteredCommand) { HelpMessage = description };
+            if (!manager.AddSubCommand(name, info))
+            {
+                throw new InvalidOperationException($"无法注册 /omni {name}：该命令已被占用。");
+            }
+
+            registeredCommands.Add(name, info);
+        }
+    }
+
+    private void UnregisterCommands()
+    {
+        if (commandManager is not null)
+        {
+            foreach (var (name, info) in registeredCommands)
+            {
+                // 仅注销本实例注册的处理器，避免移除其他模块的命令。
+                if (commandManager.SubCommands.TryGetValue(name, out var current) &&
+                    ReferenceEquals(current, info))
+                {
+                    commandManager.RemoveSubCommand(name);
+                }
+            }
+        }
+
+        registeredCommands.Clear();
+        commandManager = null;
+    }
+
+    private void OnRegisteredCommand(string command, string arguments)
+    {
+        if (IsEnabled)
+        {
+            TryHandleCommand(command, arguments);
+        }
+    }
+
     public override bool TryHandleCommand(string arguments)
     {
-        var command = arguments.Trim();
-        if (string.Equals(command, "start", StringComparison.OrdinalIgnoreCase))
+        return HandleCommandArguments(arguments);
+    }
+
+    public override bool TryHandleCommand(string command, string arguments)
+    {
+        // 兼容宿主按模块类名分发的入口。
+        if (string.Equals(command.Trim(), ModuleName, StringComparison.OrdinalIgnoreCase))
         {
-            StartProduction();
+            return HandleCommandArguments(arguments);
+        }
+
+        // 子命令表传入的是中文命令名，箭头和说明不参与解析。
+        return string.IsNullOrWhiteSpace(arguments) && HandleCommandArguments(command);
+    }
+
+    private bool HandleCommandArguments(string arguments)
+    {
+        var command = arguments.Trim();
+        if (string.Equals(command, OPEN_COMMAND, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, "open", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, "窗口", StringComparison.OrdinalIgnoreCase))
+        {
+            OpenConfigurationWindow();
             return true;
         }
 
-        if (string.Equals(command, "stop", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(command, TOGGLE_COMMAND, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, "toggle", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(command, "开关", StringComparison.OrdinalIgnoreCase))
         {
-            StopProduction("已手动停止");
+            ToggleProduction();
             return true;
         }
 
         return false;
     }
 
-    public override unsafe bool DrawSettings()
+    public override bool DrawSettings()
+    {
+        var changed = windowConfigChanged;
+        windowConfigChanged = false;
+
+        if (ImGui.Button("自动重建伊修加德"))
+        {
+            OpenConfigurationWindow();
+        }
+
+        return changed;
+    }
+
+    private void DrawConfigurationWindow()
+    {
+        if (!windowOpen)
+        {
+            return;
+        }
+
+        using var font = OmniFonts.GetUIFont().Push();
+        using var style = new ComicStyleScope();
+        var compactSize = OmniTheme.Scale(new Vector2(340f, 116f));
+        if (!windowExpanded && !windowCollapsed && !string.IsNullOrWhiteSpace(lastError))
+        {
+            var errorWidth = MathF.Max(
+                1f, compactSize.X - 2f * (OmniTheme.ChromeFrameInset() + OmniTheme.WindowInset()));
+            compactSize.Y += ImGui.CalcTextSize($"错误：{lastError}", false, errorWidth).Y +
+                             ImGui.GetStyle().ItemSpacing.Y;
+        }
+
+        var targetSize = windowCollapsed
+            ? OmniTheme.CollapsedWindowSize(OmniTheme.Scale(windowExpanded ? 720f : 340f))
+            : windowExpanded ? OmniTheme.Scale(new Vector2(720f, 760f)) : compactSize;
+        // The compact and collapsed views are intentionally fixed-size. Only the
+        // expanded configuration view remains user-resizable.
+        if (!windowExpanded || windowCollapsed || windowSizePending)
+        {
+            ImGui.SetNextWindowSize(targetSize, ImGuiCond.Always);
+            windowSizePending = false;
+        }
+        ImGui.SetNextWindowCollapsed(false, ImGuiCond.Always);
+        var flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoScrollbar |
+                    ImGuiWindowFlags.NoBackground;
+        if (!ImGui.Begin("###AutoIshgardRestorationWindow", flags))
+        {
+            ImGui.End();
+            return;
+        }
+
+        try
+        {
+            var windowPosition = ImGui.GetWindowPos();
+            var windowSize = ImGui.GetWindowSize();
+            var framePosition = windowCollapsed
+                ? windowPosition + new Vector2(OmniTheme.CollapsedHeaderSafeInset(), OmniTheme.CollapsedHeaderTop())
+                : windowPosition + new Vector2(OmniTheme.ChromeFrameInset());
+            var frameSize = windowCollapsed
+                ? new Vector2(
+                    MathF.Max(1f, windowSize.X - OmniTheme.CollapsedHeaderSafeInset() * 2f),
+                    OmniTheme.TitleBarHeight())
+                : windowSize - new Vector2(OmniTheme.ChromeFrameInset() * 2f);
+            var chrome = OmniWindowChrome.Draw(
+                framePosition,
+                frameSize,
+                windowCollapsed,
+                "自动重建伊修加德",
+                "##collapseAutoIshgardRestoration",
+                "##closeAutoIshgardRestoration");
+            if (chrome.ToggleCollapse)
+            {
+                windowCollapsed = !windowCollapsed;
+                windowSizePending = true;
+            }
+
+            if (chrome.CloseClicked)
+            {
+                windowOpen = false;
+            }
+
+            if (!windowOpen || windowCollapsed || chrome.ToggleCollapse)
+            {
+                return;
+            }
+
+            var contentPosition = framePosition + new Vector2(
+                OmniTheme.WindowInset(),
+                OmniTheme.TitleBarHeight() + OmniTheme.WindowInset());
+            var contentSize = new Vector2(
+                MathF.Max(1f, frameSize.X - OmniTheme.WindowInset() * 2f),
+                MathF.Max(
+                    1f,
+                    frameSize.Y - OmniTheme.TitleBarHeight() - OmniTheme.WindowInset() * 2f));
+            ImGui.SetCursorScreenPos(contentPosition);
+            if (!windowExpanded)
+            {
+                DrawWindowActionRow("展开", contentSize.X, () => { windowExpanded = true; windowSizePending = true; });
+                if (!string.IsNullOrWhiteSpace(lastError))
+                {
+                    ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + contentSize.X);
+                    ImGui.TextUnformatted($"错误：{lastError}");
+                    ImGui.PopTextWrapPos();
+                }
+
+                return;
+            }
+
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, Vector4.Zero);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+            try
+            {
+                using var content = ImRaii.Child(
+                    "##autoIshgardWindowContent",
+                    contentSize,
+                    false,
+                    ImGuiWindowFlags.None);
+                if (!content)
+                {
+                    return;
+                }
+
+                if (DrawConfigurationContents())
+                {
+                    windowConfigChanged = true;
+                }
+            }
+            finally
+            {
+                ImGui.PopStyleVar();
+                ImGui.PopStyleColor();
+            }
+        }
+        finally
+        {
+            ImGui.End();
+        }
+    }
+
+    private void DrawWindowActionRow(string secondaryLabel, float availableWidth, System.Action secondaryAction)
+    {
+        var rowPosition = ImGui.GetCursorScreenPos();
+        var buttonHeight = OmniTheme.SmallButtonSize().Y;
+        var secondarySize = OmniControls.CompactButtonSize(secondaryLabel);
+        var primaryWidth = MathF.Min(
+            OmniTheme.Scale(154f),
+            MathF.Max(1f, availableWidth - secondarySize.X - ImGui.GetStyle().ItemSpacing.X));
+        if (OmniControls.SmallButton(
+                running ? "停止" : "启动",
+                running,
+                new Vector2(primaryWidth, buttonHeight)))
+        {
+            ToggleProduction();
+        }
+
+        ImGui.SetCursorScreenPos(new Vector2(
+            rowPosition.X + MathF.Max(0f, availableWidth - secondarySize.X),
+            rowPosition.Y));
+        if (OmniControls.SmallButton(secondaryLabel, false, secondarySize))
+        {
+            secondaryAction();
+        }
+
+        ImGui.SetCursorScreenPos(new Vector2(
+            rowPosition.X,
+            rowPosition.Y + MathF.Max(buttonHeight, secondarySize.Y) + ImGui.GetStyle().ItemSpacing.Y));
+    }
+
+    private unsafe bool DrawConfigurationContents()
     {
         var changed = false;
+        DrawWindowActionRow("收起", ImGui.GetContentRegionAvail().X, () => { windowExpanded = false; windowSizePending = true; });
+
+        ImGui.Separator();
         var playerState = DalamudServices.PlayerState;
         var jobID = playerState.IsLoaded ? playerState.ClassJob.RowId : 0;
         var level = playerState.IsLoaded ? playerState.Level : (short)0;
         var selected = FindRecipe(config.SelectedRecipeID);
-
-        ImGui.Separator();
 
         ImGui.TextUnformatted(jobID is >= 8 and <= 15
             ? $"当前职业：{GetJobName(jobID)}  等级：{level}"
@@ -217,34 +497,32 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             : jobID is >= 8 and <= 15
                 ? "请先选择你要生产的物品"
                 : "请切换至生产职业";
-        if (ImGui.BeginCombo("生产内容", preview))
+        ImGui.SetNextItemWidth(GetLabeledControlWidth(520f, "生产内容"));
+        using (var combo = ImRaii.Combo("生产内容", preview))
         {
-            foreach (var recipe in Recipes)
+            if (combo)
             {
-                if (recipe.JobID != jobID)
+                foreach (var recipe in Recipes)
                 {
-                    continue;
-                }
+                    if (recipe.JobID != jobID)
+                    {
+                        continue;
+                    }
 
-                var available = recipe.Level <= level;
-                if (!available)
-                {
-                    ImGui.BeginDisabled();
-                }
-
-                if (ImGui.Selectable(FormatRecipe(recipe), config.SelectedRecipeID == recipe.RecipeID) && available)
-                {
-                    config.SelectedRecipeID = recipe.RecipeID;
-                    changed = true;
-                }
-
-                if (!available)
-                {
-                    ImGui.EndDisabled();
+                    var available = recipe.Level <= level;
+                    using (ImRaii.Disabled(!available))
+                    {
+                        if (OmniControls.RoundedSelectable(
+                                FormatRecipe(recipe),
+                                config.SelectedRecipeID == recipe.RecipeID,
+                                size: new Vector2(0f, OmniTheme.SmallButtonSize().Y)) && available)
+                        {
+                            config.SelectedRecipeID = recipe.RecipeID;
+                            changed = true;
+                        }
+                    }
                 }
             }
-
-            ImGui.EndCombo();
         }
 
         ImGui.Separator();
@@ -252,21 +530,31 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         var stopModePreview = stopMode == 0
             ? "背包剩余空格达到下限时提交"
             : "目标物品达到指定数量时提交";
-        if (ImGui.BeginCombo("物品提交条件", stopModePreview))
+        ImGui.SetNextItemWidth(GetLabeledControlWidth(360f, "物品提交条件"));
+        using (var combo = ImRaii.Combo("物品提交条件", stopModePreview))
         {
-            if (ImGui.Selectable("背包剩余空格达到下限时提交", stopMode == 0))
+            if (combo)
             {
-                config.StopMode = 0;
-                changed = true;
-            }
+                var optionSize = new Vector2(0f, OmniTheme.SmallButtonSize().Y);
+                ImGui.Dummy(new Vector2(0f, OmniTheme.Scale(4f)));
+                if (OmniControls.RoundedSelectable(
+                        "背包剩余空格达到下限时提交",
+                        stopMode == 0,
+                        size: optionSize))
+                {
+                    config.StopMode = 0;
+                    changed = true;
+                }
 
-            if (ImGui.Selectable("目标物品达到指定数量时提交", stopMode == 1))
-            {
-                config.StopMode = 1;
-                changed = true;
+                if (OmniControls.RoundedSelectable(
+                        "目标物品达到指定数量时提交",
+                        stopMode == 1,
+                        size: optionSize))
+                {
+                    config.StopMode = 1;
+                    changed = true;
+                }
             }
-
-            ImGui.EndCombo();
         }
 
         if (config.StopMode == 0)
@@ -294,6 +582,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             changed |= ImGui.IsItemDeactivatedAfterEdit();
         }
 
+
         ImGui.Separator();
         ImGui.TextUnformatted("库啵好运票达到数量时开始抽奖");
         var ticketThreshold = config.TicketThreshold;
@@ -305,6 +594,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
         changed |= ImGui.IsItemDeactivatedAfterEdit();
 
+        changed |= DrawScripPurchaseSettings();
+
         if (selected is { } current)
         {
             var snapshot = ReadInventory(current.ItemID);
@@ -312,8 +603,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             ImGui.TextUnformatted($"{current.ItemName}：{snapshot.ItemCount} 个");
         }
 
-        UpdateDebugCounters(DateTime.UtcNow);
-        ImGui.TextUnformatted($"好运票：{FormatDebugCounter(debugVoucherCount, debugVoucherLimit)}");
+        UpdateVoucherCount(DateTime.UtcNow);
+        ImGui.TextUnformatted($"好运票：{FormatVoucherCount(voucherCount, voucherLimit)}");
 
         ImGui.TextUnformatted($"状态：{status}");
         if (!string.IsNullOrWhiteSpace(lastError))
@@ -321,24 +612,49 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             ImGui.TextWrapped($"错误：{lastError}");
         }
 
-        if (!running)
-        {
-            if (ImGui.Button("开始"))
-            {
-                StartProduction();
-            }
-        }
-        else if (ImGui.Button("停止生产"))
+        return changed;
+    }
+
+    private static float GetLabeledControlWidth(float preferredWidth, string label)
+    {
+        var available = ImGui.GetContentRegionAvail().X - ImGui.CalcTextSize(label).X -
+                        ImGui.GetStyle().ItemSpacing.X;
+        return MathF.Max(OmniTheme.Scale(160f), MathF.Min(OmniTheme.Scale(preferredWidth), available));
+    }
+
+    private void OpenConfigurationWindow()
+    {
+        windowOpen = true;
+        windowExpanded = false;
+        windowCollapsed = false;
+        windowSizePending = true;
+    }
+
+    private void ToggleProduction()
+    {
+        if (running)
         {
             StopProduction("已手动停止");
         }
-
-        return changed;
+        else
+        {
+            StartProduction();
+        }
     }
 
     public override bool ResetSettings()
     {
-        config = new AutoIshgardRestorationConfig();
+        var defaults = new AutoIshgardRestorationConfig();
+        config.SelectedRecipeID = defaults.SelectedRecipeID;
+        config.StopMode = defaults.StopMode;
+        config.MinimumFreeSlots = defaults.MinimumFreeSlots;
+        config.TargetItemCount = defaults.TargetItemCount;
+        config.TicketThreshold = defaults.TicketThreshold;
+        config.AutoBuyScrips = defaults.AutoBuyScrips;
+        config.ScripThreshold = defaults.ScripThreshold;
+        config.ScripShopID = defaults.ScripShopID;
+        config.ScripItemID = defaults.ScripItemID;
+        config.ScripQuantity = defaults.ScripQuantity;
         return true;
     }
 
@@ -386,13 +702,15 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             }
 
             running = true;
+            turnInGeneration = 0;
+            purchasedGeneration = -1;
             activeRecipeID = recipe.Value.RecipeID;
             activeItemID = recipe.Value.ItemID;
             nextCheckAt = DateTime.UtcNow;
 
-            if (OmenTools.DService.Instance().ClientState.TerritoryType != FirmamentTerritoryID)
+            if (OmenTools.DService.Instance().ClientState.TerritoryType != FIRMAMENT_TERRITORY_ID)
             {
-                if (!TrySendCommand(FirmamentTeleportCommand))
+                if (!TrySendCommand(FIRMAMENT_TELEPORT_COMMAND))
                 {
                     FailAutomation("无法执行传送指令 /pdrtelepo 无名众人广场。");
                     return;
@@ -413,29 +731,9 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void StopProduction(string reason)
     {
-        if (running && phase is (AutomationPhase.WaitArtisanStart or AutomationPhase.Crafting or AutomationPhase.WaitArtisanStop))
-        {
-            try
-            {
-                if (getStopRequest?.InvokeFunc() != true)
-                {
-                    setStopRequest?.InvokeAction(true);
-                }
-            }
-            catch (Exception ex)
-            {
-                lastError = $"停止 Artisan 失败：{ex.Message}";
-            }
-        }
-
-        try
-        {
-            vnavmeshIPC.StopPathfind();
-        }
-        catch
-        {
-            // vnavmesh may not be installed; stopping the module must still succeed.
-        }
+        CleanupScripPurchase();
+        StopOwnedArtisan();
+        StopOwnedVnavPath();
 
         running = false;
         phase = AutomationPhase.Idle;
@@ -448,6 +746,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         craftCycleStartingItemCount = 0;
         movableSince = null;
         initialDestination = default;
+        artisanStartedByModule = false;
+        vnavPathStartedByModule = false;
         status = reason;
     }
 
@@ -461,7 +761,13 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         nextCheckAt = DateTime.UtcNow.AddMilliseconds(100);
         try
         {
-            UpdateDebugCounters(DateTime.UtcNow);
+            UpdateVoucherCount(DateTime.UtcNow);
+            if (IsScripPurchasePhase())
+            {
+                DriveScripPurchase();
+                return;
+            }
+
             var activeRecipe = FindRecipe(activeRecipeID);
             if (activeRecipe is null || activeRecipe.Value.ItemID != activeItemID)
             {
@@ -507,6 +813,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 }
                 else if (PhaseTimedOut(TimeSpan.FromSeconds(15)))
                 {
+                    artisanStartedByModule = false;
                     if (snapshot.ItemCount > craftCycleStartingItemCount)
                     {
                         BeginSubmission("Artisan 已完成本轮生产");
@@ -530,6 +837,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 }
                 else if (artisanIsBusy?.InvokeFunc() == false)
                 {
+                    artisanStartedByModule = false;
                     if (snapshot.ItemCount > craftCycleStartingItemCount)
                     {
                         BeginSubmission("Artisan 已结束本轮生产");
@@ -545,6 +853,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             case AutomationPhase.WaitArtisanStop:
                 if (artisanIsBusy?.InvokeFunc() == false)
                 {
+                    artisanStartedByModule = false;
                     BeginSubmission("Artisan 已停止");
                 }
                 else if (PhaseTimedOut(TimeSpan.FromSeconds(30)))
@@ -553,7 +862,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 }
                 break;
             case AutomationPhase.MoveToAppraiser:
-                DriveStartNPCEvent([AppraiserNPCID1, AppraiserNPCID2],
+                DriveStartNPCEvent([APPRAISER_NPC_ID_1, APPRAISER_NPC_ID_2],
                     AutomationPhase.OpenAppraiser, "提交NPC");
                 break;
             case AutomationPhase.OpenAppraiser:
@@ -575,7 +884,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 DriveWaitSupplyRefresh(recipe);
                 break;
             case AutomationPhase.MoveToLottery:
-                DriveStartNPCEvent([LotteryNPCID], AutomationPhase.OpenLottery, "库啵好运道NPC");
+                DriveStartNPCEvent([LOTTERY_NPC_ID], AutomationPhase.OpenLottery, "库啵好运道NPC");
                 break;
             case AutomationPhase.OpenLottery:
                 DriveOpenLottery();
@@ -594,7 +903,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void DriveWaitForFirmament()
     {
-        if (OmenTools.DService.Instance().ClientState.TerritoryType == FirmamentTerritoryID)
+        if (OmenTools.DService.Instance().ClientState.TerritoryType == FIRMAMENT_TERRITORY_ID)
         {
             movableSince = null;
             EnterPhase(AutomationPhase.WaitForPlayerMovable);
@@ -611,7 +920,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void DriveWaitForPlayerMovable()
     {
-        if (OmenTools.DService.Instance().ClientState.TerritoryType != FirmamentTerritoryID)
+        if (OmenTools.DService.Instance().ClientState.TerritoryType != FIRMAMENT_TERRITORY_ID)
         {
             movableSince = null;
             status = "区域尚未稳定，等待进入天穹街（区域 886）";
@@ -652,12 +961,16 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             38f + (Random.Shared.NextSingle() * 9f),
             -16f,
             162f + (Random.Shared.NextSingle() * 14f));
-        if (!TrySendCommand(BuildVnavMoveCommand(initialDestination)))
+        try
         {
-            FailAutomation("无法执行初始 /vnav moveto 指令。");
+            vnavmeshIPC.PathfindAndMoveTo(initialDestination, false);
+            vnavPathStartedByModule = true;
+        }
+        catch (Exception ex)
+        {
+            FailAutomation($"无法执行初始导航：{ex.Message}");
             return;
         }
-
         EnterPhase(AutomationPhase.MoveToInitialPoint);
         nextActionAt = DateTime.UtcNow.AddSeconds(5);
         status = $"正在前往随机生产点：{FormatPosition(initialDestination)}";
@@ -665,7 +978,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void DriveMoveToInitialPoint(RecipeOption recipe)
     {
-        if (OmenTools.DService.Instance().ClientState.TerritoryType != FirmamentTerritoryID)
+        if (OmenTools.DService.Instance().ClientState.TerritoryType != FIRMAMENT_TERRITORY_ID)
         {
             FailAutomation("前往随机生产点时离开了天穹街（区域 886）。");
             return;
@@ -680,16 +993,21 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
         if (Vector3.Distance(player.Position, initialDestination) <= 2f)
         {
-            vnavmeshIPC.StopPathfind();
+            StopOwnedVnavPath();
             StartCraftingCycle(recipe, "已到达随机生产点");
             return;
         }
 
         if (!vnavmeshIPC.GetIsPathfindRunning() && DateTime.UtcNow >= nextActionAt)
         {
-            if (!TrySendCommand(BuildVnavMoveCommand(initialDestination)))
+            try
             {
-                FailAutomation("无法再次执行初始 /vnav moveto 指令。");
+                vnavmeshIPC.PathfindAndMoveTo(initialDestination, false);
+                vnavPathStartedByModule = true;
+            }
+            catch (Exception ex)
+            {
+                FailAutomation($"无法再次执行初始导航：{ex.Message}");
                 return;
             }
             nextActionAt = DateTime.UtcNow.AddSeconds(5);
@@ -726,14 +1044,21 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             ? Math.Max(1, config.TargetItemCount - snapshot.ItemCount)
             : 9999;
         craftCycleStartingItemCount = snapshot.ItemCount;
-        craftItem?.InvokeAction((ushort)recipe.RecipeID, amount);
+        if (craftItem is null)
+        {
+            FailAutomation("Artisan 插件接口不可用。");
+            return;
+        }
+
+        artisanStartedByModule = true;
+        craftItem.InvokeAction((ushort)recipe.RecipeID, amount);
         EnterPhase(AutomationPhase.WaitArtisanStart);
         status = $"{reason}；正在启动 Artisan 制作 {recipe.ItemName}";
     }
 
     private void BeginSubmission(string reason)
     {
-        if (OmenTools.DService.Instance().ClientState.TerritoryType != FirmamentTerritoryID)
+        if (OmenTools.DService.Instance().ClientState.TerritoryType != FIRMAMENT_TERRITORY_ID)
         {
             FailAutomation("自动提交仅支持在天穹街内启动（区域 886）。");
             return;
@@ -751,6 +1076,11 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void RequestArtisanStop()
     {
+        if (!artisanStartedByModule)
+        {
+            return;
+        }
+
         if (getStopRequest?.InvokeFunc() != true)
         {
             setStopRequest?.InvokeAction(true);
@@ -759,7 +1089,6 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void DriveStartNPCEvent(uint[] npcIDs, AutomationPhase nextPhase, string label)
     {
-        vnavmeshIPC.StopPathfind();
         if (IsOccupied())
         {
             status = $"等待交互结束后打开{label}";
@@ -823,13 +1152,10 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             return;
         }
 
-        var values = stackalloc AtkValue[2];
-        values[0] = new AtkValue { Type = ValueType.Int, Int = 0 };
-        values[1] = new AtkValue { Type = ValueType.Int, Int = (int)recipe.JobID - 8 };
-        addon->FireCallback(2, values, true);
+        addon->Callback(0, (int)recipe.JobID - 8);
         EnterPhase(AutomationPhase.SelectItem);
         nextActionAt = DateTime.UtcNow.AddMilliseconds(700);
-        status = $"已选择{recipe.JobName}提交列表";
+        status = $"已选择{GetJobName(recipe.JobID)}提交列表";
     }
 
     private unsafe void DriveSelectItem(RecipeOption recipe)
@@ -838,6 +1164,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         {
             return;
         }
+
+        if (TryBeginAutoScripPurchase()) return;
 
         if (ReadInventory(activeItemID).ItemCount <= 0)
         {
@@ -862,12 +1190,9 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             return;
         }
 
-        var values = stackalloc AtkValue[2];
-        values[0] = new AtkValue { Type = ValueType.Int, Int = 1 };
-        values[1] = new AtkValue { Type = ValueType.Int, Int = row };
         itemCountBeforeTurnIn = ReadInventory(activeItemID).ItemCount;
         scripCountBeforeTurnIn = ReadSkybuildersScrips();
-        addon->FireCallback(2, values, true);
+        addon->Callback(1, row);
         EnterPhase(AutomationPhase.FillRequest);
         nextActionAt = DateTime.UtcNow.AddMilliseconds(500);
         status = $"正在提交：{recipe.ItemName}";
@@ -912,21 +1237,11 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             var icon = picker->AtkValuesCount > 11 && picker->AtkValues[11].Type == ValueType.UInt
                 ? picker->AtkValues[11].UInt
                 : 0u;
-            var pickValues = stackalloc AtkValue[4];
-            pickValues[0] = new AtkValue { Type = ValueType.Int, Int = 0 };
-            pickValues[1] = new AtkValue { Type = ValueType.Int, Int = 0 };
-            pickValues[2] = new AtkValue { Type = ValueType.UInt, UInt = icon };
-            pickValues[3] = new AtkValue { Type = ValueType.UInt, UInt = 0 };
-            picker->FireCallback(4, pickValues, true);
+            picker->Callback(0, 0, icon, 0u);
         }
         else
         {
-            var openValues = stackalloc AtkValue[4];
-            openValues[0] = new AtkValue { Type = ValueType.Int, Int = 2 };
-            openValues[1] = new AtkValue { Type = ValueType.UInt, UInt = 0 };
-            openValues[2] = new AtkValue { Type = ValueType.UInt, UInt = 0 };
-            openValues[3] = new AtkValue { Type = ValueType.UInt, UInt = 0 };
-            requestBase->FireCallback(4, openValues, true);
+            requestBase->Callback(2, 0u, 0u, 0u);
         }
 
         nextActionAt = DateTime.UtcNow.AddMilliseconds(500);
@@ -987,6 +1302,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             }
         }
 
+        if (TryBeginAutoScripPurchase()) return;
+
         if (GetAddon("HWDSupply") == null)
         {
             if (IsOccupied())
@@ -1003,7 +1320,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             return;
         }
 
-        if (TryGetVoucherCount(out var vouchers) && vouchers >= config.TicketThreshold)
+        if (TryReadVoucherCount(out var vouchers, out _) && vouchers >= config.TicketThreshold)
         {
             ticketsToPlay = vouchers;
             CloseAddon("HWDSupply");
@@ -1026,7 +1343,9 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private unsafe void FinishSubmissionOrStartLottery(RecipeOption recipe)
     {
-        if (TryGetVoucherCount(out var vouchers) && vouchers >= config.TicketThreshold)
+        if (TryBeginAutoScripPurchase()) return;
+
+        if (TryReadVoucherCount(out var vouchers, out _) && vouchers >= config.TicketThreshold)
         {
             ticketsToPlay = vouchers;
             CloseAddon("HWDSupply");
@@ -1139,11 +1458,11 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         }
         else if (!lotteryScratched && DateTime.UtcNow >= nextActionAt)
         {
-            var evt = new AtkEvent { Param = RightLotteryEventParam };
+            var evt = new AtkEvent { Param = RIGHT_LOTTERY_EVENT_PARAM };
             var eventData = default(AtkEventData);
             addon->AtkUnitBase.ReceiveEvent(
                 AtkEventType.ButtonClick,
-                RightLotteryEventParam,
+                RIGHT_LOTTERY_EVENT_PARAM,
                 &evt,
                 &eventData);
             lotteryScratchAttempts++;
@@ -1214,7 +1533,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         if (ticketsToPlay > 0)
         {
             var npc = OmenTools.DService.Instance().ObjectTable
-                .FirstOrDefault(o => GetBaseID(o.Address) == LotteryNPCID && o.IsTargetable);
+                .FirstOrDefault(o => GetBaseID(o.Address) == LOTTERY_NPC_ID && o.IsTargetable);
             if (npc is null)
             {
                 FailAutomation("未找到库啵好运道NPC。");
@@ -1304,6 +1623,7 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void EnterWaitSupplyRefresh(int currentCount, uint currentScrips)
     {
+        turnInGeneration++;
         var detectedByScrips = currentScrips > scripCountBeforeTurnIn;
         itemCountBeforeTurnIn = currentCount;
         scripCountBeforeTurnIn = currentScrips;
@@ -1314,10 +1634,417 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
             : $"已提交 1 件，等待提交界面刷新（剩余 {currentCount} 个）";
     }
 
+    // SpecialShop rows verified against the Chinese client. Names/prices are not duplicated here.
+    private static readonly uint[] ScripShopIDs = [1770041, 1770281, 1770301];
+    private readonly List<ScripProduct> scripProducts = [];
+    private string scripProductSearch = string.Empty;
+    private string scripCatalogError = string.Empty;
+    private bool scripCatalogLoaded;
+    private ScripProduct? pendingScripProduct;
+    private bool scripEventOwned;
+    private bool scripEventEnded;
+    private bool scripQuantitySent;
+    private bool scripConfirmSent;
+    private int scripRemaining;
+    private int scripPurchased;
+    private int scripBatch;
+    private int scripSelectedIndex = -1;
+    private uint scripBalanceBefore;
+    private int scripItemCountBefore;
+    private int scripVouchersBefore = -1;
+    private int turnInGeneration;
+    private int purchasedGeneration = -1;
+
+    private sealed record ScripProduct(uint ShopID, uint ItemID, string Name, int Price, int StackSize, bool Unique);
+
+    private void EnsureScripCatalog()
+    {
+        if (scripCatalogLoaded) return;
+        try
+        {
+            var products = new List<ScripProduct>();
+            foreach (var id in ScripShopIDs)
+            {
+                if (!LuminaGetter.TryGetRow<SpecialShop>(id, out var shop))
+                    throw new InvalidOperationException("无法读取振兴票商店数据。");
+                products.AddRange(ReadScripProducts(shop, itemID => LuminaGetter.GetRow<Item>(itemID)));
+            }
+
+            scripProducts.AddRange(products.OrderBy(x => x.ShopID).ThenBy(x => x.Name));
+            scripCatalogLoaded = true;
+            scripCatalogError = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            DalamudServices.PluginLog.Warning(ex, "AutoIshgardRestoration: failed to load scrip products.");
+            scripCatalogError = "振兴票商品数据暂不可用，请重新打开模块后重试。";
+        }
+    }
+
+    private static List<ScripProduct> ReadScripProducts(SpecialShop shop, Func<uint, Item?> getItem)
+    {
+        var result = new List<ScripProduct>();
+        foreach (var entry in shop.Item)
+        {
+            var rewards = entry.ReceiveItems.Where(x => x.Item.RowId != 0).ToArray();
+            var costs = entry.ItemCosts.Where(x => x.ItemCost.RowId != 0 || x.CurrencyCost != 0).ToArray();
+            // Only expose one-item, one-currency recipes that this buyer can verify exactly.
+            if (rewards.Length != 1 || rewards[0].ReceiveCount != 1 || rewards[0].ReceiveHq ||
+                costs.Length != 1 || costs[0].ItemCost.RowId != SKYBUILDERS_SCRIP_ITEM_ID ||
+                costs[0].CurrencyCost is 0 or > 10000 || costs[0].CostType != 0 || costs[0].CollectabilityCost != 0)
+                continue;
+            var item = getItem(rewards[0].Item.RowId);
+            if (item is not { } value || value.StackSize == 0) continue;
+            result.Add(new ScripProduct(shop.RowId, value.RowId, value.Name.ExtractText(),
+                (int)costs[0].CurrencyCost, (int)value.StackSize, value.IsUnique));
+        }
+        return result;
+    }
+
+    private ScripProduct? SelectedScripProduct() => scripProducts.FirstOrDefault(
+        x => x.ShopID == config.ScripShopID && x.ItemID == config.ScripItemID);
+
+    private static bool MatchesScripSearch(string name, string search) =>
+        name.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private bool DrawScripPurchaseSettings()
+    {
+        ImGui.Separator();
+        var changed = false;
+        using (ImRaii.Disabled(running))
+        {
+            var enabled = config.AutoBuyScrips;
+            if (OmniControls.Checkbox("天穹街振兴票自动购买", ref enabled))
+            {
+                config.AutoBuyScrips = enabled;
+                changed = true;
+            }
+            if (!enabled) return changed;
+            EnsureScripCatalog();
+            ImGui.TextUnformatted($"天穹街振兴票：{ReadSkybuildersScrips()} / 10000");
+            ImGui.TextUnformatted("天穹街振兴票达到数量时开始购买");
+            var threshold = config.ScripThreshold;
+            ImGui.SetNextItemWidth(OmniTheme.Scale(160f));
+            if (OmniControls.InputInt("##scripThreshold", ref threshold))
+                config.ScripThreshold = Math.Clamp(threshold, 1, 10000);
+            changed |= ImGui.IsItemDeactivatedAfterEdit();
+
+            var selected = SelectedScripProduct();
+            ImGui.SetNextItemWidth(GetLabeledControlWidth(520f, "购买物品"));
+            var popupHeight = MathF.Max(1f, MathF.Min(OmniTheme.Scale(360f), ImGui.GetMainViewport().WorkSize.Y * 0.8f));
+            ImGui.SetNextWindowSizeConstraints(new Vector2(0f, popupHeight), new Vector2(float.MaxValue, popupHeight));
+            using (var combo = ImRaii.Combo("购买物品", selected is null ? "请选择购买物品" : $"{selected.Name}（{selected.Price} 票）"))
+            {
+                if (combo)
+                {
+                    ImGui.Dummy(new Vector2(0f, OmniTheme.Scale(4f)));
+                    if (ImGui.IsWindowAppearing()) ImGui.SetKeyboardFocusHere();
+                    var searchChanged = OmniControls.InputTextWithHint(
+                        "##scripProductSearch", "输入物品名称搜索", ref scripProductSearch, 128,
+                        ImGui.GetContentRegionAvail().X);
+                    ImGui.Separator();
+                    var productSelected = false;
+                    // Keep the search field visible while only the results scroll.
+                    using (var results = ImRaii.Child("##scripProductResults",
+                               new Vector2(0f, MathF.Max(1f, ImGui.GetContentRegionAvail().Y))))
+                    {
+                        if (results)
+                        {
+                            if (searchChanged) ImGui.SetScrollY(0f);
+                            var hasMatches = false;
+                            ImGui.Dummy(new Vector2(0f, OmniTheme.Scale(4f)));
+                            foreach (var product in scripProducts)
+                            {
+                                if (!MatchesScripSearch(product.Name, scripProductSearch)) continue;
+                                hasMatches = true;
+                                if (OmniControls.RoundedSelectable($"{product.Name}（{product.Price} 票）##{product.ShopID}-{product.ItemID}",
+                                        selected == product, size: new Vector2(0f, OmniTheme.SmallButtonSize().Y)))
+                                {
+                                    config.ScripShopID = product.ShopID;
+                                    config.ScripItemID = product.ItemID;
+                                    selected = product;
+                                    config.ScripQuantity = Math.Min(Math.Max(1, config.ScripQuantity), Math.Max(1, GetConfiguredScripLimit(product)));
+                                    changed = true;
+                                    productSelected = true;
+                                }
+                            }
+                            if (!hasMatches) ImGui.TextDisabled("没有匹配的物品");
+                        }
+                    }
+                    if (productSelected) ImGui.CloseCurrentPopup();
+                }
+            }
+
+            if (!string.IsNullOrEmpty(scripCatalogError)) ImGui.TextWrapped(scripCatalogError);
+            var limit = selected is null ? 0 : GetConfiguredScripLimit(selected);
+            ImGui.TextUnformatted($"每次购买数量（按触发票数最多 {limit} 个）");
+            // Configuration uses the trigger budget; live currency/capacity is checked only when buying.
+            var quantity = limit == 0 ? 0 : Math.Clamp(config.ScripQuantity, 1, limit);
+            if (limit > 0 && quantity != config.ScripQuantity)
+            {
+                config.ScripQuantity = quantity;
+                changed = true;
+            }
+            ImGui.SetNextItemWidth(OmniTheme.Scale(160f));
+            using (ImRaii.Disabled(limit == 0))
+            {
+                if (OmniControls.InputInt("##scripQuantity", ref quantity) && limit > 0)
+                    config.ScripQuantity = Math.Clamp(quantity, 1, limit);
+                changed |= ImGui.IsItemDeactivatedAfterEdit();
+            }
+            if (selected is not null)
+                ImGui.TextUnformatted($"预计花费：{(long)quantity * selected.Price} 票");
+        }
+        return changed;
+    }
+
+    private int GetConfiguredScripLimit(ScripProduct product) =>
+        CalculateConfiguredScripLimit(config.ScripThreshold, product.Price, product.Unique);
+
+    private static int CalculateConfiguredScripLimit(int threshold, int price, bool unique) =>
+        CalculateScripLimit(Math.Clamp(threshold, 1, 10000), price, int.MaxValue, unique, 0);
+
+    private static int CalculateScripLimit(int balance, int price, int capacity, bool unique, int owned)
+    {
+        if (balance < 0 || price <= 0 || capacity <= 0 || owned < 0) return 0;
+        var limit = Math.Min(Math.Clamp(balance, 0, 10000) / price, capacity);
+        return unique ? Math.Min(limit, owned == 0 ? 1 : 0) : limit;
+    }
+
+    private static unsafe int GetScripPurchaseLimit(ScripProduct product)
+    {
+        var capacity = 0;
+        var owned = 0;
+        foreach (var type in MainInventoryTypes)
+        {
+            foreach (ref readonly var item in OmenTools.DService.Instance().GameInventory.GetInventoryItems(type))
+            {
+                if (item.IsEmpty) capacity += product.StackSize;
+                else if (item.BaseItemId == product.ItemID)
+                {
+                    owned += item.Quantity;
+                    if (!item.IsHq) capacity += Math.Max(0, product.StackSize - item.Quantity);
+                }
+            }
+        }
+        if (product.Unique)
+        {
+            var inventory = InventoryManager.Instance();
+            if (inventory == null) return 0;
+            owned = Math.Max(owned, inventory->GetInventoryItemCount(product.ItemID, false, true, true, 0) +
+                                    inventory->GetInventoryItemCount(product.ItemID, true, true, true, 0));
+        }
+        return CalculateScripLimit((int)ReadSkybuildersScrips(), product.Price, capacity, product.Unique, owned);
+    }
+
+    private bool IsScripPurchasePhase() => phase is AutomationPhase.PrepareScripPurchase or AutomationPhase.OpenScripShop
+        or AutomationPhase.BuyScripItem or AutomationPhase.VerifyScripPurchase or AutomationPhase.CloseScripShop;
+
+    private bool TryBeginAutoScripPurchase()
+    {
+        if (!config.AutoBuyScrips || purchasedGeneration == turnInGeneration ||
+            ReadSkybuildersScrips() < Math.Clamp(config.ScripThreshold, 1, 10000)) return false;
+        purchasedGeneration = turnInGeneration;
+        BeginScripPurchase();
+        return true;
+    }
+
+    private unsafe void BeginScripPurchase()
+    {
+        EnsureScripCatalog();
+        var product = SelectedScripProduct();
+        if (product is null)
+        {
+            FailAutomation("请先选择振兴票购买物品。");
+            return;
+        }
+        var amount = Math.Min(GetConfiguredScripLimit(product),
+            Math.Min(Math.Max(1, config.ScripQuantity), GetScripPurchaseLimit(product)));
+        if (amount <= 0)
+        {
+            FailAutomation("无法购买所选物品：触发票数或余额不足、背包已满或已持有唯一物品。");
+            return;
+        }
+        pendingScripProduct = product;
+        scripRemaining = amount;
+        scripPurchased = 0;
+        scripVouchersBefore = TryReadVoucherCount(out var vouchers, out _) ? vouchers : -1;
+        scripEventOwned = scripEventEnded = false;
+        running = true;
+        EnterPhase(AutomationPhase.PrepareScripPurchase);
+        nextCheckAt = nextActionAt = DateTime.UtcNow;
+        status = "暂停提交，准备购买振兴票商品";
+    }
+
+    private static unsafe bool IsScripShopActive()
+    {
+        var agent = AgentShop.Instance();
+        return agent != null && agent->IsAgentActive();
+    }
+
+    private static unsafe bool HasScripTransactionDialog() =>
+        GetAddon("ShopExchangeCurrencyDialog") != null || GetAddon("SelectYesno") != null;
+
+    private unsafe void DriveScripPurchase()
+    {
+        var services = OmenTools.DService.Instance();
+        var product = pendingScripProduct;
+        if (product is null || !services.ClientState.IsLoggedIn ||
+            services.ClientState.TerritoryType != FIRMAMENT_TERRITORY_ID ||
+            services.Condition[ConditionFlag.BetweenAreas] || services.Condition[ConditionFlag.BetweenAreas51] ||
+            services.Condition[ConditionFlag.InCombat])
+        {
+            FailAutomation("当前状态无法继续购买，已停止。");
+            return;
+        }
+        if (PhaseTimedOut(TimeSpan.FromSeconds(20)))
+        {
+            FailAutomation(phase == AutomationPhase.VerifyScripPurchase
+                ? "未能确认购买结果，已停止以避免重复购买。请检查振兴票和背包。"
+                : "购买流程等待超时，已停止。请检查游戏提示。");
+            return;
+        }
+        if (DateTime.UtcNow < nextActionAt) return;
+        switch (phase)
+        {
+            case AutomationPhase.PrepareScripPurchase:
+                CloseAddon("Request");
+                CloseAddon("HWDSupply");
+                if (IsOccupied() || GetAddon("HWDSupply") != null || GetAddon("Request") != null) return;
+                if (!IsPlayerMovable() || IsScripShopActive() || HasScripTransactionDialog()) return;
+                var player = services.ObjectTable.LocalPlayer;
+                if (player is null) return;
+                // Directly start the SpecialShop event without pathfinding or NPC interaction.
+                scripEventOwned = true;
+                var entityID = ((FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject*)player.Address)->EntityId;
+                new EventStartPackt(entityID, product.ShopID).Send();
+                EnterPhase(AutomationPhase.OpenScripShop);
+                nextActionAt = DateTime.UtcNow.AddMilliseconds(800);
+                status = "正在打开振兴票商店";
+                break;
+            case AutomationPhase.OpenScripShop:
+                if (!IsScripShopActive()) return;
+                EnterPhase(AutomationPhase.BuyScripItem);
+                nextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                break;
+            case AutomationPhase.BuyScripItem:
+                if (HasScripTransactionDialog()) return;
+                var agent = AgentShop.Instance();
+                if (agent == null || !agent->IsAgentActive() || agent->ItemReceive == null) return;
+                scripSelectedIndex = -1;
+                for (var i = 0; i < agent->ItemReceiveSpan.Length; i++)
+                    if (agent->ItemReceiveSpan[i].ItemId == product.ItemID) { scripSelectedIndex = i; break; }
+                if (scripSelectedIndex < 0) return;
+                scripBatch = Math.Min(Math.Min(scripRemaining, GetScripPurchaseLimit(product)), Math.Min(99, product.StackSize));
+                if (scripBatch <= 0)
+                {
+                    FailAutomation("购买条件已变化，余额或背包空间不足，已停止。");
+                    return;
+                }
+                scripBalanceBefore = ReadSkybuildersScrips();
+                scripItemCountBefore = ReadInventory(product.ItemID).ItemCount;
+                scripQuantitySent = scripConfirmSent = false;
+                // Transition before dispatch: another plugin may confirm synchronously.
+                EnterPhase(AutomationPhase.VerifyScripPurchase);
+                AgentId.Shop.SendEvent(1, 0, scripSelectedIndex, scripBatch, 0);
+                status = $"正在购买：{product.Name} × {scripBatch}";
+                nextActionAt = DateTime.UtcNow.AddMilliseconds(400);
+                break;
+            case AutomationPhase.VerifyScripPurchase:
+                if (ScripPurchaseApplied(scripBalanceBefore, ReadSkybuildersScrips(), scripItemCountBefore,
+                        ReadInventory(product.ItemID).ItemCount, product.Price, scripBatch))
+                {
+                    scripPurchased += scripBatch;
+                    scripRemaining -= scripBatch;
+                    EnterPhase(scripRemaining > 0 ? AutomationPhase.BuyScripItem : AutomationPhase.CloseScripShop);
+                    nextActionAt = DateTime.UtcNow.AddMilliseconds(800);
+                    status = $"已购买：{product.Name} × {scripPurchased}";
+                    return;
+                }
+                ConfirmScripPurchase(product);
+                break;
+            case AutomationPhase.CloseScripShop:
+                EndScripEvent();
+                if (IsScripShopActive() || IsOccupied() || HasScripTransactionDialog() || GetAddon("ShopExchangeCurrency") != null) return;
+                var summary = $"已购买：{product.Name} × {scripPurchased}";
+                pendingScripProduct = null;
+                scripEventOwned = false;
+                var recipe = FindRecipe(activeRecipeID);
+                if (recipe is null) { FailAutomation("生产配置已变化，请重新启动。"); return; }
+                if (scripVouchersBefore >= config.TicketThreshold)
+                {
+                    ticketsToPlay = scripVouchersBefore;
+                    EnterPhase(AutomationPhase.MoveToLottery);
+                    status = "购买完成，继续库啵好运道";
+                }
+                else if (ReadInventory(activeItemID).ItemCount > 0 || scripVouchersBefore < 0)
+                {
+                    EnterPhase(AutomationPhase.MoveToAppraiser);
+                    status = "购买完成，继续提交物品";
+                }
+                else BeginNextCraftingCycle("振兴票购买完成");
+                break;
+        }
+    }
+
+    private static bool ScripPurchaseApplied(uint beforeBalance, uint nowBalance, int beforeItems, int nowItems, int price, int quantity) =>
+        price > 0 && quantity > 0 && beforeBalance >= (long)price * quantity &&
+        nowBalance == beforeBalance - (long)price * quantity && nowItems == beforeItems + (long)quantity;
+
+    private unsafe void ConfirmScripPurchase(ScripProduct product)
+    {
+        var agent = AgentShop.Instance();
+        if (phase != AutomationPhase.VerifyScripPurchase || !scripEventOwned || scripEventEnded || agent == null || !agent->IsAgentActive() ||
+            agent->SelectedItemIndex != scripSelectedIndex || scripSelectedIndex < 0 ||
+            scripSelectedIndex >= agent->ItemReceiveSpan.Length ||
+            agent->ItemReceiveSpan[scripSelectedIndex].ItemId != product.ItemID) return;
+        var dialog = GetAddon("ShopExchangeCurrencyDialog");
+        if (!scripQuantitySent && dialog != null && dialog->IsReady)
+        {
+            scripQuantitySent = true;
+            dialog->Callback(0, scripBatch);
+            nextActionAt = DateTime.UtcNow.AddMilliseconds(400);
+            return;
+        }
+        var yesNo = (AddonSelectYesno*)GetAddon("SelectYesno");
+        if (!scripConfirmSent && yesNo != null && yesNo->YesButton != null && yesNo->YesButton->IsEnabled)
+        {
+            // The prompt and item label can be separate nodes and vary by client language.
+            // Match the pending transaction and selected item ID above, not localized dialog text.
+            scripConfirmSent = true;
+            if (!ClickButton((AtkUnitBase*)yesNo, yesNo->YesButton)) scripConfirmSent = false;
+            nextActionAt = DateTime.UtcNow.AddMilliseconds(400);
+        }
+    }
+
+    private unsafe void EndScripEvent()
+    {
+        if (!scripEventOwned || scripEventEnded || pendingScripProduct is not { } product) return;
+        scripEventEnded = true;
+        new EventCompletePackt(product.ShopID, 0).Send();
+        CloseAddon("ShopExchangeCurrencyDialog");
+        CloseAddon("ShopExchangeCurrency");
+    }
+
+    private void CleanupScripPurchase()
+    {
+        if (scripEventOwned)
+        {
+            try { EndScripEvent(); }
+            catch (Exception ex)
+            {
+                // Log cleanup failures without retrying the purchase or hiding the original error.
+                DalamudServices.PluginLog.Warning(ex, "AutoIshgardRestoration: failed to close owned scrip shop event.");
+            }
+        }
+        scripEventOwned = false;
+        pendingScripProduct = null;
+    }
+
     private static unsafe uint ReadSkybuildersScrips()
     {
         var manager = CurrencyManager.Instance();
-        return manager == null ? 0 : manager->GetItemCount(SkybuildersScripItemID);
+        return manager == null ? 0 : manager->GetItemCount(SKYBUILDERS_SCRIP_ITEM_ID);
     }
 
     private static unsafe bool ClickButton(AtkUnitBase* addon, AtkComponentButton* button)
@@ -1480,16 +2207,12 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         {
             return OmenTools.DService.Instance().Command.ProcessCommand(command);
         }
-        catch
+        catch (Exception ex)
         {
+            DalamudServices.PluginLog.Warning(ex, "AutoIshgardRestoration: failed to send command.");
             return false;
         }
     }
-
-    private static string BuildVnavMoveCommand(Vector3 destination) =>
-        $"/vnav moveto {destination.X.ToString("0.###", CultureInfo.InvariantCulture)} " +
-        $"{destination.Y.ToString("0.###", CultureInfo.InvariantCulture)} " +
-        destination.Z.ToString("0.###", CultureInfo.InvariantCulture);
 
     private static string FormatPosition(Vector3 position) =>
         $"{position.X.ToString("0.0", CultureInfo.InvariantCulture)}, " +
@@ -1514,8 +2237,8 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
     private static unsafe int FindSupplyRow(AtkUnitBase* addon, uint itemID)
     {
         var target = itemID + 500000;
-        const int indexOffset = 18;
-        for (var i = 0; i + indexOffset < addon->AtkValuesCount; i++)
+        const int INDEX_OFFSET = 18;
+        for (var i = 0; i + INDEX_OFFSET < addon->AtkValuesCount; i++)
         {
             ref var value = ref addon->AtkValues[i];
             if (value.Type != ValueType.UInt || value.UInt != target)
@@ -1523,16 +2246,17 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 continue;
             }
 
-            ref var index = ref addon->AtkValues[i + indexOffset];
+            ref var index = ref addon->AtkValues[i + INDEX_OFFSET];
             return index.Type == ValueType.UInt ? (int)index.UInt : -1;
         }
 
         return -1;
     }
 
-    private static unsafe bool TryGetVoucherCount(out int current)
+    private static unsafe bool TryReadVoucherCount(out int current, out int limit)
     {
         current = -1;
+        limit = -1;
         var addon = GetAddon("HWDSupply");
         if (addon == null)
         {
@@ -1553,13 +2277,15 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
                 continue;
             }
 
-            var match = VoucherPattern.Match(text.Trim());
+            var normalized = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            var match = VOUCHER_PATTERN.Match(normalized);
             if (match.Success
                 && int.TryParse(match.Groups[1].Value, out var count)
-                && int.TryParse(match.Groups[2].Value, out var limit)
-                && limit == 10)
+                && int.TryParse(match.Groups[2].Value, out var parsedLimit)
+                && parsedLimit == 10)
             {
                 current = count;
+                limit = 10;
                 return true;
             }
         }
@@ -1567,59 +2293,18 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         return false;
     }
 
-    private unsafe void UpdateDebugCounters(DateTime now)
+    private void UpdateVoucherCount(DateTime now)
     {
-        if (now < nextDebugReadAt)
+        if (now < nextVoucherReadAt)
         {
             return;
         }
 
-        nextDebugReadAt = now.AddMilliseconds(500);
-        debugVoucherCount = -1;
-        debugVoucherLimit = -1;
-
-        var addon = GetAddon("HWDSupply");
-        if (addon == null)
-        {
-            debugVoucherStatus = "HWDSupply 未打开，暂时无法读取票数";
-            return;
-        }
-
-        for (var i = 0; i < addon->AtkValuesCount; i++)
-        {
-            ref var value = ref addon->AtkValues[i];
-            if (value.Type != ValueType.String || value.String.Value == null)
-            {
-                continue;
-            }
-
-            var text = Marshal.PtrToStringUTF8((nint)value.String.Value);
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                continue;
-            }
-
-            var normalized = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            var match = VoucherPattern.Match(normalized);
-            if (!match.Success || !int.TryParse(match.Groups[1].Value, out var count)
-                || !int.TryParse(match.Groups[2].Value, out var limit))
-            {
-                continue;
-            }
-
-            if (limit == 10)
-            {
-                debugVoucherCount = count;
-                debugVoucherLimit = limit;
-                debugVoucherStatus = $"已从 HWDSupply AtkValues[{i}] 读取";
-                return;
-            }
-        }
-
-        debugVoucherStatus = "HWDSupply 已打开，但未找到上限为 10 的票数文本";
+        nextVoucherReadAt = now.AddMilliseconds(500);
+        TryReadVoucherCount(out voucherCount, out voucherLimit);
     }
 
-    private static string FormatDebugCounter(int count, int limit) =>
+    private static string FormatVoucherCount(int count, int limit) =>
         count >= 0 && limit >= 0 ? $"{count}/{limit}" : "未识别";
 
     private void EnterPhase(AutomationPhase next)
@@ -1648,18 +2333,61 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
 
     private void FailAutomation(string message)
     {
-        try
-        {
-            vnavmeshIPC.StopPathfind();
-        }
-        catch
-        {
-        }
+        CleanupScripPurchase();
+        StopOwnedArtisan();
+        StopOwnedVnavPath();
 
         running = false;
         phase = AutomationPhase.Idle;
         lastError = message;
         status = "自动流程已停止";
+    }
+
+    private void StopOwnedArtisan()
+    {
+        if (!artisanStartedByModule)
+        {
+            return;
+        }
+
+        try
+        {
+            if (getStopRequest?.InvokeFunc() != true)
+            {
+                setStopRequest?.InvokeAction(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            DalamudServices.PluginLog.Warning(ex, "AutoIshgardRestoration: failed to stop owned Artisan production.");
+            lastError = $"停止 Artisan 失败：{ex.Message}";
+        }
+        finally
+        {
+            artisanStartedByModule = false;
+        }
+    }
+
+    private void StopOwnedVnavPath()
+    {
+        if (!vnavPathStartedByModule)
+        {
+            return;
+        }
+
+        try
+        {
+            vnavmeshIPC.StopPathfind();
+        }
+        catch (Exception ex)
+        {
+            DalamudServices.PluginLog.Warning(ex, "AutoIshgardRestoration: failed to stop owned navigation.");
+            lastError = $"停止导航失败：{ex.Message}";
+        }
+        finally
+        {
+            vnavPathStartedByModule = false;
+        }
     }
 
     private bool ShouldStop(InventorySnapshot snapshot, out string reason)
@@ -1724,18 +2452,10 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         return null;
     }
 
-    private static string GetJobName(uint jobID) => jobID switch
-    {
-        8 => "刻木匠",
-        9 => "锻铁匠",
-        10 => "铸甲匠",
-        11 => "雕金匠",
-        12 => "制革匠",
-        13 => "裁衣匠",
-        14 => "炼金术士",
-        15 => "烹调师",
-        _ => $"职业 #{jobID}"
-    };
+    private static string GetJobName(uint jobID) =>
+        LuminaGetter.TryGetRow<ClassJob>(jobID, out var job)
+            ? job.Name.ExtractText()
+            : $"职业 #{jobID}";
 
     private static string FormatRecipe(RecipeOption recipe) =>
         $"{recipe.Level}级{(recipe.IsExpert ? "高难度" : string.Empty)} · {recipe.ItemName}" +
@@ -1747,7 +2467,6 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         uint JobID,
         int Level,
         bool IsExpert,
-        string JobName,
         string ItemName);
 
     private readonly record struct InventorySnapshot(int FreeSlots, int TotalSlots, int ItemCount);
@@ -1772,7 +2491,12 @@ public sealed class AutoIshgardRestoration(AutoIshgardRestorationConfig config) 
         OpenLottery,
         PlayLottery,
         PostLottery,
-        PrepareNextCycle
+        PrepareNextCycle,
+        PrepareScripPurchase,
+        OpenScripShop,
+        BuyScripItem,
+        VerifyScripPurchase,
+        CloseScripShop
     }
 }
 
@@ -1789,4 +2513,14 @@ public sealed class AutoIshgardRestorationConfig
     public int TargetItemCount { get; set; } = 30;
 
     public int TicketThreshold { get; set; } = 5;
+
+    public bool AutoBuyScrips { get; set; }
+
+    public int ScripThreshold { get; set; } = 9000;
+
+    public uint ScripShopID { get; set; }
+
+    public uint ScripItemID { get; set; }
+
+    public int ScripQuantity { get; set; } = 1;
 }
